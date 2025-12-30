@@ -5,14 +5,7 @@ from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
 # ==============================================================================
-# 战法名称：全战法综合复盘系统
-# ------------------------------------------------------------------------------
-# 1. 【隔山打牛】：涨停次日巨量假阴洗盘，回踩不破大阴低，突破缩量阴顶买入
-# 2. 【高量不破】：高量柱后回踩不破其最低价，标准阳盖阴为确认点
-# 3. 【三位一体】：股价放量上穿60日线（起飞线），MACD零轴金叉
-# 4. 【机构洗盘-涨停破位】：涨停后快速跌穿支撑诱空，3天内盘中收回关键位
-# 5. 【机构洗盘-草上飞】：均线多头排列（5>13>21），回踩不破13日线
-# 6. 【追涨停技巧】：放量涨停后现缩量阳线，次日突破缩量阳最高价介入
+# 升级目标：分文件夹存放 + 信号精简化
 # ==============================================================================
 
 DATA_DIR = 'stock_data'
@@ -25,55 +18,60 @@ COL_MAP = {
 }
 
 def check_all_strategies(df):
-    """检测所有战法逻辑"""
-    if len(df) < 65: return None
+    """检测所有战法逻辑，返回命中的【所有】战法列表"""
+    if len(df) < 65: return []
     
+    hits = []
     c, l, h, o, v, p = df['close'].values, df['low'].values, df['high'].values, df['open'].values, df['volume'].values, df['pct_chg'].values
     ma5, ma13, ma21, ma60 = [df['close'].rolling(w).mean().values for w in [5, 13, 21, 60]]
     v_ma5 = df['volume'].rolling(5).mean().values
 
-    # --- [战法 1: 隔山打牛] ---
-    # 逻辑：寻找15天内的涨停+20日新高量阴线，回踩不破低，突破缩量阴顶
+    # --- 1. 隔山打牛 (核心爆发) ---
     for i in range(2, 15):
         idx = len(df) - i
         if p[idx-1] > 9.5 and c[idx] < o[idx] and v[idx] == max(v[idx-20:idx+1]):
-            # 寻找后续的缩量阴
             for j in range(idx + 1, len(df)):
-                if c[j] < o[j] and v[j] < v[idx] * 0.5: # 缩量阴
-                    if c[-1] > h[j] and all(l[idx:] >= l[idx]): # 突破顶且不破底
-                        return "隔山打牛: 假阴洗盘结束，连板启动"
+                if c[j] < o[j] and v[j] < v[idx] * 0.5:
+                    if c[-1] > h[j] and all(l[idx:] >= l[idx]):
+                        hits.append("隔山打牛")
+                        break
 
-    # --- [战法 2: 高量不破] ---
-    # 逻辑：高量柱后回踩不破最低价
+    # --- 2. 高量不破 (强力支撑) ---
     for i in range(1, 10):
         idx = len(df) - 1 - i
-        if v[idx] > v_ma5[idx] * 2 and c[idx] > o[idx]:
-            if all(l[idx+1:] >= l[idx]) and c[-1] > h[idx]: # 阳盖阴确认
-                return "高量不破: 回踩守住底线，必火信号"
+        if v[idx] > v_ma5[idx] * 2.5 and c[idx] > o[idx]: # 提高倍数至2.5，更严苛
+            if all(l[idx+1:] >= l[idx]) and c[-1] > h[idx]:
+                hits.append("高量不破")
+                break
 
-    # --- [战法 3: 三位一体] ---
-    # 逻辑：站稳60日起飞线 + 放大成交量
-    if c[-1] > ma60[-1] and c[-2] <= ma60[-2] and v[-1] > v_ma5[-1]:
-        return "三位一体: 步入起飞线，有理操作区"
+    # --- 3. 三位一体 (趋势转折) ---
+    if c[-1] > ma60[-1] and c[-2] <= ma60[-2] and v[-1] > v_ma5[-1] * 1.5:
+        hits.append("三位一体")
 
-    # --- [战法 4: 机构洗盘-草上飞] ---
-    # 逻辑：多头排列，回踩13日线不破
-    if ma5[-1] > ma13[-1] > ma21[-1] and l[-1] >= ma13[-1] and c[-1] > ma5[-1]:
-        return "草上飞: 机构控盘波段，持股待涨"
+    # --- 4. 草上飞 (波段控盘 - 增加成交量过滤防止泛滥) ---
+    if ma5[-1] > ma13[-1] > ma21[-1] and l[-1] >= ma13[-1]:
+        if c[-1] > ma5[-1] and v[-1] > v_ma5[-1]: # 必须放量才算飞
+            hits.append("草上飞")
 
-    return None
+    # --- 5. 追涨停 (空中加油) ---
+    if len(df) >= 3 and p[-2] > 9.5 and v[-1] < v[-2] and c[-1] > o[-1]:
+        if c[-1] > h[-2] * 0.98: # 靠近涨停高点准备突破
+            hits.append("追涨停")
+
+    return hits
 
 def process_stock(file_name):
     code = file_name.split('.')[0]
-    if code.startswith(('30', '68')): return None # 侧重主板
+    if code.startswith(('30', '68')): return None 
     try:
         df = pd.read_csv(os.path.join(DATA_DIR, file_name))
         df = df.rename(columns=COL_MAP)
         if df['pct_chg'].dtype == object:
             df['pct_chg'] = df['pct_chg'].str.replace('%', '').astype(float)
         
-        tag = check_all_strategies(df)
-        if tag: return {'code': code, 'strategy': tag}
+        hit_list = check_all_strategies(df)
+        if hit_list:
+            return {'code': code, 'strategies': hit_list, 'last_pct': df['pct_chg'].iloc[-1]}
     except: return None
     return None
 
@@ -88,12 +86,23 @@ def main():
         results = [r for r in executor.map(process_stock, files) if r is not None]
     
     if results:
-        res_df = pd.merge(pd.DataFrame(results), names_df, on='code')
-        now = datetime.now()
-        out_dir = os.path.join(OUTPUT_BASE, now.strftime('%Y%m'))
-        os.makedirs(out_dir, exist_ok=True)
-        res_df.to_csv(os.path.join(out_dir, f"Final_Strategies_{now.strftime('%Y%m%d')}.csv"), index=False, encoding='utf-8-sig')
-        print(f"筛选完成，命中 {len(res_df)} 只目标股。")
+        now_str = datetime.now().strftime('%Y%m%d')
+        # 按战法分类
+        strategy_buckets = {}
+        for r in results:
+            for s in r['strategies']:
+                if s not in strategy_buckets: strategy_buckets[s] = []
+                # 合并名称
+                name = names_df[names_df['code'] == r['code']]['name'].values[0]
+                strategy_buckets[s].append({'代码': r['code'], '名称': name, '今日涨幅': r['last_pct']})
+
+        # 分别输出
+        for s_name, stocks in strategy_buckets.items():
+            s_df = pd.DataFrame(stocks).sort_values(by='今日涨幅', ascending=False)
+            out_dir = os.path.join(OUTPUT_BASE, now_str, s_name)
+            os.makedirs(out_dir, exist_ok=True)
+            s_df.to_csv(os.path.join(out_dir, f"{s_name}_结果.csv"), index=False, encoding='utf-8-sig')
+            print(f"战法【{s_name}】保存成功：获取到 {len(stocks)} 只标的")
 
 if __name__ == '__main__':
     main()
